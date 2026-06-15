@@ -1,6 +1,3 @@
-# Standard Library
-from random import random
-
 # Third Party
 from celery import chain as Chain
 from celery import shared_task
@@ -12,20 +9,18 @@ from esi.exceptions import HTTPClientError, HTTPNotModified, HTTPServerError
 
 from ...models import CorporationAudit
 from .. import app_settings
-from ..utils import esi_error_retry, no_fail_chain, rate_limited_task_no_fail
+from ..utils import esi_error_retry, no_fail_chain, rate_limited_task
 from .assets import corp_update_assets
 from .characters import update_character_logins_from_corp
 from .contracts import corp_contract_item_fetch, corp_contract_update
 from .indy import corp_update_industry_jobs
+from .sovereignty import corp_sovereignty_hub_detail_update, corp_sovereignty_hub_update
 from .structures import (
     corp_starbase_update,
     corp_structure_update,
     corp_update_pocos,
 )
 from .wallet import update_corp_wallet_divisions
-
-TZ_STRING = "%Y-%m-%dT%H:%M:%SZ"
-
 
 logger = get_extension_logger(__name__)
 
@@ -100,7 +95,7 @@ def update_corp_starbases(self, corp_id, force_refresh=False, chain=[]):
     base=QueueOnce,
     name="corptools.tasks.update_corp_contract_items"
 )
-@rate_limited_task_no_fail("600/15m")
+@rate_limited_task("600/15m")
 @esi_error_retry
 def update_corporate_contract_items(self, corp_id, contract_id, force_refresh=False):
     try:
@@ -157,6 +152,50 @@ def update_corp_industry_jobs(self, corp_id: int, force_refresh: bool = False, c
 
 
 @shared_task(
+    bind=True,
+    base=QueueOnce,
+    name="corptools.tasks.update_corp_sovereignty_hub_detail",
+    once={
+        "unlock_before_run": True,
+        "graceful": False,
+        "keys": ["corp_id", "hub_id"]},
+)
+@rate_limited_task("120/15m", keys=["corp_id"])
+@esi_error_retry
+def update_corp_sovereignty_hub_detail(self, corp_id: int, hub_id: int, force_refresh: bool = False) -> str:
+    try:
+        return corp_sovereignty_hub_detail_update(corp_id, hub_id, force_refresh=force_refresh)
+    except HTTPNotModified:
+        pass
+    except (HTTPClientError, HTTPServerError) as e:
+        if e.status_code == 404:
+            logger.warning(
+                f"CT: Sovereignty hub {hub_id} for corp {corp_id} NOT FOUND")
+            return f"CT: Sovereignty hub {hub_id} NOT FOUND did it die?"
+        else:
+            raise e
+
+
+@shared_task(
+    bind=True,
+    base=QueueOnce,
+    name="corptools.tasks.update_corp_sovereignty_hubs"
+)
+@no_fail_chain
+@esi_error_retry
+def update_corp_sovereignty_hubs(self, corp_id: int, force_refresh: bool = False, chain=[]) -> str:
+    hub_ids = corp_sovereignty_hub_update(corp_id, force_refresh=force_refresh)
+    if hub_ids:
+        for hub_id in hub_ids:
+            update_corp_sovereignty_hub_detail.apply_async(
+                priority=8,
+                args=[corp_id, hub_id]
+            )
+
+    return f"CT: Queued {len(hub_ids or [])} sovereignty hub detail fetches for corp {corp_id}"
+
+
+@shared_task(
     name="corptools.tasks.update_corp"
 )
 def update_corp(corp_id, force_refresh=False):
@@ -173,6 +212,12 @@ def update_corp(corp_id, force_refresh=False):
     que.append(update_corp_logins.si(corp_id, force_refresh=force_refresh))
     que.append(
         update_corp_industry_jobs.si(
+            corp_id,
+            force_refresh=force_refresh
+        )
+    )
+    que.append(
+        update_corp_sovereignty_hubs.si(
             corp_id,
             force_refresh=force_refresh
         )

@@ -10,6 +10,7 @@ from ninja.types import DictStrAny
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import F, Q, QuerySet, Sum
 from django.utils import timezone
+from django.utils.translation import gettext as _
 
 # Alliance Auth
 from allianceauth.eveonline.models import EveCharacter
@@ -94,6 +95,20 @@ def get_alts_queryset(main_char):
         return EveCharacter.objects.filter(pk=main_char.pk)
 
 
+def resolve_character(request, character_id):
+    """Resolve character_id=0, check access, return (error, main_char, alts_qs).
+
+    On success error is None. On failure error is a (403, message) tuple and
+    main_char / alts_qs are None.
+    """
+    if character_id == 0:
+        character_id = request.user.profile.main_character.character_id
+    response, main = get_main_character(request, character_id)
+    if not response:
+        return (403, _("Permission Denied")), None, None
+    return None, main, get_alts_queryset(main)
+
+
 def get_corporation_characters(request, corporation_id):
     return EveCharacter.objects.filter(
         character_ownership__user__profile__main_character__corporation_id=corporation_id,
@@ -108,6 +123,33 @@ def round_or_null(value, digits=2):
         return round(value, digits)
     else:
         return value
+
+
+def format_hours_as_duration(hours: int) -> str:
+    # Keep the fuel dashboard's long-form hour display local to corptools
+    # instead of changing Django's global time filters for every template.
+    hours = max(int(hours or 0), 0)
+    units = (
+        ("month", 30 * 24),
+        ("day", 24),
+        ("hour", 1),
+    )
+    parts = []
+
+    for label, unit_hours in units:
+        if hours >= unit_hours or (label == "hour" and not parts):
+            value, hours = divmod(hours, unit_hours)
+            if value:
+                suffix = "" if value == 1 else "s"
+                parts.append(f"{value} {label}{suffix}")
+
+    if not parts:
+        return "0 hours"
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return " and ".join(parts)
+    return f"{', '.join(parts[:-1])}, and {parts[-1]}"
 
 
 def wallet_check(characters, types, first_parties=None, minimum_amount=None, look_back=30):
@@ -294,13 +336,6 @@ def glances_gas_check(characters):
     ).aggregate(
         total=Sum(F("quantity") * F("type_name__volume"))
     )["total"]
-
-
-def roundFloat(input):
-    if input:
-        return int(input)
-    else:
-        return input
 
 
 def glances_assets_character(characters):

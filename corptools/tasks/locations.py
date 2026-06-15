@@ -27,7 +27,12 @@ from ..models import (
     JumpClone,
 )
 from ..task_helpers.update_tasks import fetch_location_name
-from .utils import esi_error_retry, no_fail_chain
+from .utils import (
+    esi_error_retry,
+    get_error_count_flag,
+    no_fail_chain,
+    rate_limited_task,
+)
 
 TZ_STRING = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -54,8 +59,17 @@ def set_location_cooloff(location_id):
     return cache.set(build_location_cooloff_cache_tag(location_id), True, (60 * 60 * 24 * 7))
 
 
-def get_error_count_flag():
-    return cache.get("esi_errors_timeout", False)
+def build_location_char_cooloff_cache_tag(location_id, char_id):
+    return f"cooldown_loc_id_{location_id}_char_id_{char_id}"
+
+
+def get_location_char_cooloff(location_id, char_id):
+    return cache.get(build_location_char_cooloff_cache_tag(location_id, char_id), False)
+
+
+def set_location_char_cooloff(location_id, char_id):
+    # timeout for 7 days
+    return cache.set(build_location_char_cooloff_cache_tag(location_id, char_id), True, (60 * 60 * 24 * 7))
 
 
 def location_get(location_id):
@@ -213,6 +227,7 @@ def update_missing_locations(location_id):
     max_retries=None,
     name="corptools.tasks.update_location"
 )
+@rate_limited_task("50/5m")
 @esi_error_retry
 def update_location(self, location_id, character_ids=None, force_citadel=False):
 
@@ -244,14 +259,16 @@ def update_location(self, location_id, character_ids=None, force_citadel=False):
         return f"CT LOCATIONS: No more Characters for Location_id: {location_id} cooling off for a while"
 
     for c_id in char_ids:
-        location = fetch_location_name(location_id, None, c_id)
-        if location is not None:
-            location.save()
-            return update_missing_locations(location_id)
-        else:
-            location_set(location_id, c_id)
-            if get_error_count_flag():
-                self.retry(countdown=300)
+        if not get_location_char_cooloff(location_id, c_id):
+            location = fetch_location_name(location_id, None, c_id)
+            if location is not None:
+                location.save()
+                return update_missing_locations(location_id)
+            else:
+                set_location_char_cooloff(location_id, c_id)
+                location_set(location_id, c_id)
+                if get_error_count_flag():
+                    self.retry(countdown=300)
 
     set_location_cooloff(location_id)
     return f"CT LOCATIONS: No more Characters for Location_id: {location_id} cooling off for a while"
@@ -385,7 +402,7 @@ def update_all_locations(self, character_filter=None, force_citadels=False, upda
             ).values_list('location_id', flat=True)
         )
 
-        all_locations += set(queryset2)
+        all_locations.update(queryset2)
 
     logger.info(f"CT LOCATIONS: {len(all_locations)} Locations to find")
 

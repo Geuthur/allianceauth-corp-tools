@@ -1,4 +1,5 @@
 # Standard Library
+import os
 import re
 
 # Third Party
@@ -10,7 +11,7 @@ from django.utils import timezone
 # Alliance Auth
 from esi.openapi_clients import ESIClientProvider as ESIOpenApiProvider
 
-from . import __appname__, __url__, __version__, app_settings
+from . import __appname__, __compat_date__, __url__, __version__, app_settings
 from .task_helpers.skill_helpers import SkillListCache
 
 
@@ -95,7 +96,7 @@ esi = None
 routes = EveRouter()
 skills = SkillListCache()
 
-compat = "2025-08-26" if not app_settings.CT_COMPAT_DATE_OVERRIDE else app_settings.CT_COMPAT_DATE_OVERRIDE
+compat = __compat_date__ if not app_settings.CT_COMPAT_DATE_OVERRIDE else app_settings.CT_COMPAT_DATE_OVERRIDE
 
 
 class OpenAPI(ESIOpenApiProvider):
@@ -120,8 +121,12 @@ class OpenAPI(ESIOpenApiProvider):
             yield lo[i:i + n]
 
 
+dir_path = os.path.dirname(os.path.realpath(__file__))
+
 esi_openapi = OpenAPI(
     compatibility_date=compat,
+    # Overide for local spec!
+    spec_file=f"{dir_path}/openapi.json",
     ua_appname=__appname__,
     ua_url=__url__,
     ua_version=__version__,
@@ -203,5 +208,18 @@ esi_openapi = OpenAPI(
         # moons
         "GetCorporationCorporationIdMiningObservers",
         "GetCorporationCorporationIdMiningObserversObserverId",
+
+        # Used in 3rd party tools
+        "PostUiOpenwindowInformation",
+
+        # 2026-05-19, endpoints added for all the new OpenAPI fun stuff!
+        "GetCorporationsStructuresSovereigntyHubsListing",
+        "GetCorporationsStructuresSovereigntyHubsDetail",
+        "GetCorporationsStructuresSkyhooksListing",
+        "GetCorporationsStructuresSkyhooksDetail",
+        "GetCharactersStructuresMercenaryDensListing",
+        "GetCharactersStructuresMercenaryDensDetail",
+        "GetCharactersAccessListsListing",
+        "GetCharactersAccessListsDetail"
     ]
 )

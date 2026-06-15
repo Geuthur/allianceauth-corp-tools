@@ -2,6 +2,7 @@
 import json
 import xml.etree.ElementTree as ET
 from datetime import timedelta
+from math import ceil
 
 # Third Party
 from celery.schedules import crontab
@@ -26,16 +27,20 @@ from django.shortcuts import redirect, render
 from django.template import TemplateDoesNotExist
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.utils.translation import gettext_lazy as _
 
 # Alliance Auth
 from allianceauth.crontab.utils import offset_cron
 from allianceauth.eveonline.models import EveCharacter, EveCorporationInfo
+from allianceauth.framework.datatables import DataTablesView
 from allianceauth.services.hooks import get_extension_logger
 from esi.decorators import _check_callback, token_required
 from esi.views import sso_redirect
 
 from . import __version__, app_settings
 from .api.corporation import dashboards
+from .api.helpers import format_hours_as_duration
 from .forms import UploadForm
 from .models import (
     CharacterAudit,
@@ -135,6 +140,7 @@ def add_corp_section(request, *args, **kwargs):
     pocos = request.GET.get('p', False)
     contracts = request.GET.get('c', False)
     industry_jobs = request.GET.get('i', False)
+    sovereignty = request.GET.get('sov', False)
 
     # if we're coming back from SSO with a new token, return it
     token = _check_callback(request)
@@ -186,40 +192,11 @@ def add_corp_section(request, *args, **kwargs):
     if industry_jobs:
         scopes += app_settings._corp_scopes_industry_jobs
 
+    if sovereignty:
+        scopes += app_settings._corp_scopes_sov
+
     # user has selected to add a new token
     return sso_redirect(request, scopes=scopes)
-
-
-@login_required
-@permission_required('corptools.view_characteraudit')
-def corptools_menu(request):
-    # get available models
-    cas = CharacterAudit.objects.visible_to(request.user)\
-        .select_related('character__character_ownership__user__profile__main_character',
-                        'character__characteraudit')\
-        .prefetch_related('character__character_ownership__user__character_ownerships')\
-        .prefetch_related('character__character_ownership__user__character_ownerships__character')\
-        .prefetch_related('character__character_ownership__user__character_ownerships__character__characteraudit')\
-
-
-    chars = {}
-    orphans = []
-    for char in cas:
-        try:
-            main = char.character.character_ownership.user.profile.main_character
-            if main:
-                if main.character_name not in chars:
-                    chars[str(main.character_id)] = {'main': main,
-                                                     'audit': char}
-            else:
-                orphans.append(char)
-        except ObjectDoesNotExist:
-            orphans.append(char)
-
-    if len(chars) == 1:
-        return redirect('corptools:overview', chars[list(chars.keys())[0]]['main'].character_id)
-
-    return render(request, 'corptools/menu.html', context={'characters': chars, 'orphans': orphans})
 
 
 @login_required
@@ -240,7 +217,7 @@ def admin(request):
     bridges = MapJumpBridge.objects.all().count()
 
     characters = CharacterAudit.objects.all().count()
-    actives = CharacterAudit.get_oldest_qs().count()
+    actives = len(CharacterAudit.get_oldest_qs())
     skilllists = SkillList.objects.all().count()
     corpations = CorporationAudit.objects.all().count()
 
@@ -282,7 +259,13 @@ def admin_run_tasks(request):
     if request.method == 'POST':
         if request.POST.get('run_update_all'):
             messages.info(request, "Queued update_all_characters")
-            update_all_characters.apply_async(priority=6)
+            update_all_characters.apply_async(
+                priority=6,
+                kwargs={
+                    "force_refresh": False,
+                    "now": True
+                }
+            )
         if request.POST.get('run_update_eve_models'):
             messages.info(request, "Queued update_all_eve_names")
             update_all_eve_names.apply_async(priority=6)
@@ -404,13 +387,6 @@ def skill_list_editor(request):
 
 
 @login_required
-def update_account(request, character_id):
-    check_account.apply_async(args=[character_id], priority=6)
-    messages.success(request, "Requested an update task.")
-    return redirect('corptools:view')
-
-
-@login_required
 def react_menu(request):
     return redirect('corptools:reactlegacymain', request.user.profile.main_character.character_id)
 
@@ -437,14 +413,93 @@ def react_main(request, character_id):
     return render(request, 'corptools/character/react_base.html', context={"version": __version__, "app_name": "corptools/char", "page_title": "Character Audit"})
 
 
-@login_required
-def v3_ui_render(request, character_id):
-    return render(request, 'corptools/character/react_base.html', context={"version": __version__, "app_name": "corptools/char", "page_title": "Character Audit"})
+# @login_required
+# def v3_ui_render(request, character_id):
+#     return render(request, 'corptools/character/react_base.html', context={"version": __version__, "app_name": "corptools/char", "page_title": "Character Audit"})
+
+
+# @login_required
+# def react_corp(request):
+#     return render(request, 'corptools/corporation/react_base.html', context={"version": __version__, "app_name": "corptools/corp", "page_title": "Corporation Audit"})
+
+
+def _get_char_update_ts_columns():
+    ct_conf = CorptoolsConfiguration.get_solo()
+    cols = []
+    if not ct_conf.disable_update_pub_data:
+        cols.append(('pub_data', _('Public Data')))
+    if app_settings.CT_CHAR_ASSETS_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_ASSETS_MODULE and not ct_conf.disable_update_assets:
+        cols.append(('assets', _('Assets')))
+    if app_settings.CT_CHAR_CLONES_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_CLONES_MODULE and not ct_conf.disable_update_clones:
+        cols.append(('clones', _('Clones')))
+    if app_settings.CT_CHAR_SKILLS_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_SKILLS_MODULE and not ct_conf.disable_update_skills:
+        cols.append(('skills', _('Skills')))
+        cols.append(('skill_que', _('Skill Queue')))
+    if app_settings.CT_CHAR_WALLET_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_WALLET_MODULE and not ct_conf.disable_update_wallet:
+        cols.append(('wallet', _('Wallet')))
+        cols.append(('orders', _('Orders')))
+    if app_settings.CT_CHAR_NOTIFICATIONS_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_NOTIFICATIONS_MODULE and not ct_conf.disable_update_notif:
+        cols.append(('notif', _('Notifications')))
+    if app_settings.CT_CHAR_ROLES_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_ROLES_MODULE and not ct_conf.disable_update_roles:
+        cols.append(('roles', _('Roles')))
+    if app_settings.CT_CHAR_MAIL_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_MAIL_MODULE and not ct_conf.disable_update_mails:
+        cols.append(('mails', _('Mail')))
+    if app_settings.CT_CHAR_LOYALTYPOINTS_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_LOYALTYPOINTS_MODULE and not ct_conf.disable_update_loyaltypoints:
+        cols.append(('loyaltypoints', _('Loyalty Points')))
+    if app_settings.CT_CHAR_MINING_MODULE and not app_settings.CT_CHAR_ACTIVE_IGNORE_MINING_MODULE and not ct_conf.disable_update_mining:
+        cols.append(('mining', _('Mining')))
+    return cols
+
+
+@method_decorator(login_required, name='dispatch')
+@method_decorator(permission_required('corptools.admin'), name='dispatch')
+class CharacterUpdateDashData(DataTablesView):
+    model = CharacterAudit
+
+    _FIXED_COLUMNS = [
+        ('character__character_name', 'corptools/stubs/char_updates/character.html'),
+        ('character__character_ownership__user__profile__main_character__character_name',
+         'corptools/stubs/char_updates/main.html'),
+        ('character__character_ownership__user__profile__main_character__corporation_name',
+         'corptools/stubs/char_updates/corporation.html'),
+        ('character__character_ownership__user__profile__main_character__alliance_name',
+         'corptools/stubs/char_updates/alliance.html'),
+        ('active', 'corptools/stubs/char_updates/active.html'),
+    ]
+
+    @property
+    def columns(self):
+        cols = list(self._FIXED_COLUMNS)
+        for key, _ in _get_char_update_ts_columns():
+            ts_tmpl = (
+                '{{% if row.update_timestamps.{key} %}}'
+                '<span class="ts-cell" data-ts="{{{{ row.update_timestamps.{key} }}}}"></span>'
+                '{{% else %}}—{{% endif %}}'
+            ).format(key=key)
+            cols.append(('update_timestamps__' + key, ts_tmpl))
+        return cols
+
+    def get_model_qs(self, request, *args, **kwargs):
+        qs = CharacterAudit.objects.visible_to(request.user).filter(
+            character__character_ownership__isnull=False,
+        ).select_related(
+            'character',
+            'character__character_ownership',
+            'character__character_ownership__user',
+            'character__character_ownership__user__profile',
+            'character__character_ownership__user__profile__main_character',
+        )
+        filter_active = request.GET.get('filter_active', '')
+        if filter_active != '':
+            qs = qs.filter(active=(filter_active == '1'))
+        return qs
 
 
 @login_required
-def react_corp(request):
-    return render(request, 'corptools/corporation/react_base.html', context={"version": __version__, "app_name": "corptools/corp", "page_title": "Corporation Audit"})
+@permission_required('corptools.admin')
+def character_update_dashboard(request):
+    headers = [display for _, display in _get_char_update_ts_columns()]
+    return render(request, 'corptools/dashboards/character_updates_dash.html', {'headers': headers})
 
 
 @login_required
@@ -488,16 +543,23 @@ def fuel_levels(request):
 
     flex_fuel_types = [81143]
 
-    all_structures = Structure.get_visible(request.user).select_related(
+    all_structures = Structure.get_visible(
+        request.user
+    ).select_related(
         'corporation', 'corporation__corporation', 'system_name', 'type_name',
         'system_name__constellation', 'system_name__constellation__region'
     ).prefetch_related('structureservice_set')
 
     structure_tree = []
+    metenox_hourly_gas = app_settings.CT_CHAR_METENOX_GAS_USE_HOURLY
     total_hourly_fuel = 0
+    # Builds fuel consumption tree for visible structures with metenox projections
     for s in all_structures:
         structure_hourly_fuel = 0
         structure_type = 99
+        current_metenox_gas = 0
+        current_metenox_gas_hourly = 0
+        current_metenox_gas_hours = 0
 
         if s.type_id in cit:
             structure_type = 0
@@ -514,10 +576,14 @@ def fuel_levels(request):
                 total_hourly_fuel += fuel_use
                 structure_hourly_fuel += fuel_use
 
+        rounded_hourly_fuel = ceil(structure_hourly_fuel)
         hours = 0
 
         if s.fuel_expires is not None:
-            hours = (s.fuel_expires - timezone.now()).total_seconds() // 3600
+            hours = max(
+                ceil((s.fuel_expires - timezone.now()).total_seconds() / 3600),
+                0
+            )
 
         extras = None
 
@@ -535,27 +601,45 @@ def fuel_levels(request):
                 out["name"] = itm.type_name.name
                 out["qty"] += itm.quantity
 
+            current_metenox_gas = out["qty"]
+            current_metenox_gas_hourly = metenox_hourly_gas
+            current_metenox_gas_hours = max(
+                ceil(current_metenox_gas / current_metenox_gas_hourly),
+                0
+            )
             out["expires"] = timezone.now() + timedelta(hours=out["qty"] /
-                                                        app_settings.CT_CHAR_METENOX_GAS_USE_HOURLY)
+                                                        metenox_hourly_gas)
             if out['qty'] > 0:
                 extras = out
 
+        current_blocks = max(hours * rounded_hourly_fuel, 0)
         structure_tree.append(
             {
                 'structure': s,
-                'fuel_req': structure_hourly_fuel,
-                "current_blocks": int(hours * structure_hourly_fuel),
+                # Expose hourly/day/month usage so the dashboard can total
+                # filtered rows client-side without re-querying the server.
+                'fuel_req': rounded_hourly_fuel,
+                'fuel_req_day': rounded_hourly_fuel * 24,
+                'fuel_req_30d': rounded_hourly_fuel * 720,
+                'gas_req': current_metenox_gas_hourly,
+                'gas_req_day': current_metenox_gas_hourly * 24,
+                'gas_req_30d': current_metenox_gas_hourly * 720,
+                "current_blocks": current_blocks,
                 "extra_fuel_info": extras,
+                "metenox_gas_hourly": current_metenox_gas_hourly,
+                "current_metenox_gas": current_metenox_gas,
+                "block_hours_left": hours,
+                "gas_hours_left": current_metenox_gas_hours,
+                "block_duration_left": format_hours_as_duration(hours),
+                "gas_duration_left": format_hours_as_duration(current_metenox_gas_hours),
                 "90day": max(
-                    int(
-                        (
-                            structure_hourly_fuel * 90 * 24
-                        ) - (
-                            hours * structure_hourly_fuel
-                        )
-                    ),
+                    (rounded_hourly_fuel * 90 * 24) - current_blocks,
                     0
-                )
+                ),
+                "gas_90day": max(
+                    (current_metenox_gas_hourly * 90 * 24) - current_metenox_gas,
+                    0
+                ),
             }
         )
 

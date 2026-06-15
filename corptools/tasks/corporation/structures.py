@@ -26,7 +26,7 @@ from corptools.models import (
 from corptools.models.eve_models import MapJumpBridge
 from corptools.task_helpers.update_tasks import fetch_location_name
 
-from .. import providers
+from ... import providers
 from .utils import NoTokens, get_corp_token, update_corp_audit
 
 logger = get_extension_logger(__name__)
@@ -82,7 +82,7 @@ def corp_structure_update(corp_id, force_refresh=False):  # pagnated results
                         locations = providers.esi_openapi.client.Assets.PostCorporationsCorporationIdAssetsLocations(
                             corporation_id=_corporation.corporation.corporation_id,
                             item_ids=[_structure.structure_id],
-                            token=token
+                            token=_token
                         ).result()
 
                         _location = locations[0]
@@ -324,13 +324,13 @@ def corp_starbase_update(corp_id, force_refresh=True):  # Set true as we have ba
             update_fields["moon"] = moon
 
         eve_type = ItemType.objects.get(id=sb.type_id)
-        
+
         # Convert to Dict until we manage the new OpenAPI Object in our API Structures
         fuels = [
             {"type_id": fuel.type_id, "quantity": fuel.quantity}
             for fuel in (starbase.fuels or [])
         ]
-        
+
         Starbase.objects.update_or_create(
             starbase_id=sb.starbase_id,
             corporation=_corporation,
@@ -408,7 +408,7 @@ def corp_update_pocos(corp_id, full_update=False):
     for id_chunk in providers.esi_openapi.chunk_ids(_all_ids):
         _all_locations += providers.esi_openapi.client.Assets.PostCorporationsCorporationIdAssetsLocations(
             corporation_id=corp_id,
-            item_ids=id_chunk,
+            body=id_chunk,
             token=token_assets
         ).result()
 
@@ -432,7 +432,7 @@ def corp_update_pocos(corp_id, full_update=False):
         ).order_by(
             "distance"
         ).first()
-        _office_to_names[n['item_id']] = nearest
+        _office_to_names[n.item_id] = nearest
 
     for poco in poco_data:
         Poco.objects.update_or_create(
@@ -454,7 +454,7 @@ def corp_update_pocos(corp_id, full_update=False):
                 "system_id": poco.system_id,
                 "system_name_id": poco.system_id,
                 "name": _office_to_names.get(poco.office_id).name,
-                "planet_id": _office_to_names.get(poco.office_id).planet_id,
+                "planet_id": _office_to_names.get(poco.office_id).id,
                 "terrible_standing_tax_rate": poco.terrible_standing_tax_rate
             }
         )

@@ -1,13 +1,18 @@
+# Standard Library
 import pprint
 
+# Third Party
 from ninja import NinjaAPI
 
+# Django
 from django.core.cache import cache
 from django.utils import timezone
 from django.utils.http import http_date
 
+# Alliance Auth
 from esi.exceptions import HTTPNotModified
 
+# AA Example App
 from corptools.task_helpers.char_tasks import get_token
 
 
@@ -16,24 +21,8 @@ class TestingApiEndpoints:
 
     def __init__(self, api: NinjaAPI):
         @api.get(
-            "/extras/test/newapi1",
-            tags=["Testing"]
-        )
-        def get_test_api_bravadosih(request):
-            """
-                Not for real use!
-                this is kinda like bravado in use... no type hinting
-            """
-            if not request.user.is_superuser:
-                return 403, {"message": "Hard no pall!"}
-
-            from esi.clients import OpenAPIEsiClientProvider
-            api = OpenAPIEsiClientProvider()
-
-            return api.client.Alliance.get_alliances_alliance_id(alliance_id=1900696668)
-
-        @api.get(
             "/extras/test/skilltest",
+            response={200: dict, 403: str},
             tags=["Testing"]
         )
         def get_test_api_skilltests(request):
@@ -42,74 +31,17 @@ class TestingApiEndpoints:
                 this is kinda like bravado in use... no type hinting
             """
             if not request.user.is_superuser:
-                return 403, {"message": "Hard no pall!"}
+                return 403, "Permission Denied"
 
+            # AA Example App
             from corptools.providers import skills
             skills.get_and_cache_user(request.user.id, force_rebuild=True)
 
             return skills.get_and_cache_user(request.user.id)
 
         @api.get(
-            "/extras/test/newapi2",
-            tags=["Testing"]
-        )
-        def get_test_api_openapi(request):
-            """
-                Not for real use!
-                this has type hinting
-            """
-            if not request.user.is_superuser:
-                return 403, {"message": "Hard no pall!"}
-
-            from esi.clients import OpenAPIEsiClientProvider
-            api = OpenAPIEsiClientProvider()
-
-            from esi.client.api import AllianceApi
-
-            return AllianceApi(api.client).get_alliances_alliance_id(alliance_id=1900696668)
-
-        @api.get(
-            "/extras/test/newapi3",
-            tags=["Testing"]
-        )
-        def get_test_api_openapi_3(request, name=""):
-            """
-                Not for real use!
-                this has type hinting
-            """
-            if not request.user.is_superuser:
-                return 403, {"message": "Hard no pall!"}
-
-            from corptools.models import EveItemType
-            item, created = EveItemType.objects.get_or_create_from_esi_name(
-                name)
-            return {
-                "created": created,
-                "item_name": item.name,
-                "item_id": item.type_id
-            }
-
-        @api.get(
-            "/extras/test/newapi4",
-            tags=["Testing"]
-        )
-        def get_test_api_openapi_4(request, character_id=0):
-            """
-                Not for real use!
-                this has type hinting
-            """
-            if not request.user.is_superuser:
-                return 403, {"message": "Hard no pall!"}
-
-            from corptools.task_helpers.char_tasks import (
-                update_character_assets,
-            )
-
-            update_character_assets(character_id, force_refresh=True)
-            return "done"
-
-        @api.get(
             "/extras/test/newapi5",
+            response={200: dict, 403: str},
             tags=["Testing"]
         )
         def get_test_api_oiaopenapi3(request):
@@ -118,7 +50,7 @@ class TestingApiEndpoints:
                 this has type hinting
             """
             if not request.user.is_superuser:
-                return 403, {"message": "Hard no pall!"}
+                return 403, "Permission Denied"
             # from aiopenapi3 import OpenAPI
 
             # from esi.clients import EsiClientProvider
@@ -251,34 +183,36 @@ class TestingApiEndpoints:
             #     }
             # )
 
-            # try:
-            #     req, res = esi.client.Assets.GetCharactersCharacterIdAssets(
-            #         character_id=cid, token=token).results(return_response=True)
-            # except HTTPNotModified:
-            #     pass
-            # cache.clear()
-            # req_scopes = ['esi-characters.read_notifications.v1']
-            # token = get_token(cid, req_scopes)
-            # req, res = esi.client.Character.GetCharactersCharacterIdNotifications(
-            #     character_id=cid, token=token).results(return_response=True, use_cache=False, use_etag=False)
-            # return [req]
+            # from django.core.cache import cache
 
-            from django.core.cache import cache
+            # from corptools.providers import esi_openapi
+            # from corptools.task_helpers.char_tasks import (
+            #     update_character_skill_list,
+            # )
 
-            from corptools.providers import esi_openapi
-            from corptools.task_helpers.char_tasks import (
-                update_character_skill_list,
+            # def test_():
+            #     cid = 2117840319
+            #     op = esi_openapi.client.Skills.GetCharactersCharacterIdSkills(
+            #         character_id=cid)
+            #     etag_key = op._etag_key()
+            #     print("TTL_pre", cache.ttl(etag_key))
+            #     try:
+            #         update_character_skill_list(cid, force_refresh=False)
+            #     except Exception:
+            #         pass
+            #     print("TTL_post", cache.ttl(etag_key))
+            # test_()
+
+            req_scopes = ['esi-universe.read_structures.v1']
+            cid = 755166922
+            token = get_token(cid, req_scopes)
+
+            from ...providers import esi_openapi
+            out = esi_openapi.client.Universe.GetUniverseStructuresStructureId(
+                structure_id=1046318756657,
+                token=token
+            ).result(
+                use_etag=False,
+                use_cache=False
             )
-
-            def test_():
-                cid = 2117840319
-                op = esi_openapi.client.Skills.GetCharactersCharacterIdSkills(
-                    character_id=cid)
-                etag_key = op._etag_key()
-                print("TTL_pre", cache.ttl(etag_key))
-                try:
-                    update_character_skill_list(cid, force_refresh=False)
-                except Exception:
-                    pass
-                print("TTL_post", cache.ttl(etag_key))
-            test_()
+            print(out)

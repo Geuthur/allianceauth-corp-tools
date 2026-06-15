@@ -16,6 +16,7 @@ from allianceauth.services.hooks import get_extension_logger
 from allianceauth.services.tasks import QueueOnce
 
 # AA Example App
+from corptools.app_settings import CT_DB_BULK_CREATE_BATCH_SIZE
 from corptools.models import (
     AssetCoordiante,
     BridgeOzoneLevel,
@@ -26,7 +27,7 @@ from corptools.models import (
 )
 from corptools.task_helpers.update_tasks import fetch_location_name
 
-from .. import providers
+from ... import providers
 from ..utils import chunks
 from .utils import NoTokens, get_corp_token, update_corp_audit
 
@@ -80,6 +81,10 @@ def corp_update_assets(corp_id, force_refresh: bool = False):
         if item.location_id not in location_names:
             try:
                 if item.location_id not in failed_locations:
+                    """ this is bad
+                        This is causing the 420 issues
+                        TODO Fix this. make it similar/same as the character updates
+                    """
                     new_name = fetch_location_name(
                         item.location_id,
                         item.location_flag,
@@ -106,7 +111,8 @@ def corp_update_assets(corp_id, force_refresh: bool = False):
         # with coords we need to care about the fkeys/signals
         delete_query.delete()
 
-    CorpAsset.objects.bulk_create(items)
+    CorpAsset.objects.bulk_create(
+        items, batch_size=CT_DB_BULK_CREATE_BATCH_SIZE)
     try:
         corp_update_asset_names(corp_id)
     except Exception as e:

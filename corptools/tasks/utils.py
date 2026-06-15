@@ -1,16 +1,23 @@
 # Standard Library
 import datetime
+import functools
+import inspect
 from functools import wraps
+from time import time
+from typing import Any, Callable
 
 # Third Party
-from celery import signature
+from aiopenapi3.errors import RequestError as RequestError
+from celery import Task, signature
 from celery.exceptions import Retry
 from celery_once import AlreadyQueued
-from httpx import RequestError
+from eve_sde.tasks import check_for_sde_updates
+from httpx import RequestError as httpx_RequestError
 
 # Django
 from django.core.cache import cache
 from django.db.models import QuerySet
+from django.db.utils import IntegrityError
 from django.utils import timezone
 
 # Alliance Auth
@@ -20,7 +27,14 @@ from esi.exceptions import (
     HTTPClientError,
     HTTPServerError,
 )
-from esi.rate_limiting import interval_to_seconds
+
+# AA Example App
+from corptools.tasks.rate_limiting import (
+    TaskBucketLimitException,
+    TaskRateLimitBucket,
+    rate_limiter,
+    task_bucket_slug_key,
+)
 
 logger = get_extension_logger(__name__)
 
@@ -40,6 +54,10 @@ def enqueue_next_task(chain, delay=1):
             logger.warning(f"Skipping task as its already queued {_t}")
             continue
         break
+
+
+def get_error_count_flag():
+    return cache.get("esi_errors_timeout", False)
 
 
 def set_error_flag(timeout):
@@ -68,20 +86,32 @@ def esi_error_retry(func):
         try:
             _ret = func(*args, **kwargs)
         except Exception as e:
-            if isinstance(e, (HTTPClientError, HTTPServerError)):  # Bravado, OpenAPI
+            if isinstance(e, (ESIBucketLimitException)):  # OpenAPI
+                logger.warning(f"Hit ESI rate bucket! Pausing Task! {e}")
+                args[0].retry(countdown=e.reset)
+            elif isinstance(e, (HTTPClientError, HTTPServerError)):  # OpenAPI
                 code = e.status_code
                 if code in (420, 429):
                     logger.warning(f"Hit ESI error limit! Pausing Tasks! {e}")
                     set_error_flag(60)
                     args[0].retry(countdown=61)
-            elif isinstance(e, (ESIBucketLimitException)):  # OpenAPI
-                logger.warning(f"Hit ESI rate bucket! Pausing Task! {e}")
-                args[0].retry(countdown=e.reset)
-            elif isinstance(e, RequestError):
-                logger.warning(f"Uncaught Error from HTTPX, Retrying... {e}")
-                args[0].retry(countdown=30)
+            elif isinstance(e, (RequestError, httpx_RequestError)):  # Generic Request Errors
+                logger.warning(f"Uncaught RequestError, Retrying... {e}")
+                args[0].retry(countdown=300)
             elif isinstance(e, (OSError)):  # Bravado
                 logger.warning(f"Hit ESI error! Skipping task! {e}")
+            elif isinstance(e, (IntegrityError)):
+                logger.warning(
+                    f"Hit DB Integrity Error! SDE not up to date? retrying in 15 minutes! {e}")
+                check_for_sde_updates.apply_async(priority=1)
+                if args[0].retries < 3:
+                    sig = inspect.signature(func)
+
+                    if "force_refresh" in sig.parameters:
+                        args[0].retry(countdown=90, kwargs={
+                                      "force_refresh": True})
+                    else:
+                        args[0].retry(countdown=90)
             raise e
         return _ret
     return wrapper
@@ -122,32 +152,35 @@ def chunks(lst, n):
         yield lst[i:i + n]
 
 
-def limit_to_rate(rate_limit):
-    """convert things like 100/15m or 10/s to a delay in seconds"""
-    lim = rate_limit.split("/")
-    if len(lim[1]) < 2:
-        secs = interval_to_seconds(f"1{lim[1]}")
-    else:
-        secs = interval_to_seconds(lim[1])
-    return secs/int(lim[0])
+def rate_limited_task(rate: str, keys: list | None = None):
+    """_summary_
 
+    Args:
+        rate (str): Max rate to run this task at, in the format of 100/15m or 10/s etc
+        keys (list | bool, optional): optional keys to use for the pool. Otherwise uses task signature. Defaults to False.
 
-def rate_limited_task_no_fail(rate_limit):
-    delay = limit_to_rate(rate_limit)
-
-    def decorator(func):
-        def rate_lim_wrapper(*args, **kwargs):
-            if args[0].request.retries == 0:
-                # If it's our first go we will wait for the rate limit time
-                args[0].retry(countdown=delay)
-            excp = None
+    Returns:
+        _type_: decorated func
+    """
+    def decorator_func(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            sig = inspect.signature(func)
+            bound_args = sig.bind(*args, **kwargs)
+            task: Task = bound_args.arguments["self"]
+            key = task_bucket_slug_key(
+                task.name,
+                bound_args.arguments,
+                restrict_to=keys
+            )
+            bucket = TaskRateLimitBucket.from_rate(key, rate)
             try:
+                rate_limiter.check_bucket(bucket)
+            except TaskBucketLimitException as ex:
+                delay = ex.reset
+                task.request.retries = task.request.retries - 1
+                return task.retry(countdown=delay)
+            else:
                 return func(*args, **kwargs)
-            except Exception as e:
-                excp = e
-                logger.exception(e)
-            finally:
-                if isinstance(excp, Retry):
-                    raise excp
-        return rate_lim_wrapper
-    return decorator
+        return wrapper
+    return decorator_func
