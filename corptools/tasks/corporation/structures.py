@@ -176,6 +176,7 @@ def corp_structure_update(corp_id, force_refresh=False):  # pagnated results
         token=token
     ).results(
         force_refresh=force_refresh,
+        use_etag=False,
         store_cache=False
     )
 
@@ -348,6 +349,7 @@ def corp_starbase_update(corp_id, force_refresh=True):  # Set true as we have ba
                 token=_token
             ).result(
                 force_refresh=force_refresh,
+                use_etag=False,
                 store_cache=False
             )
         except HTTPNotModified:
@@ -430,6 +432,7 @@ def corp_update_pocos(corp_id, full_update=False):
         token=token
     ).results(
         force_refresh=full_update,
+        use_etag=False,
         store_cache=False
     )
 
